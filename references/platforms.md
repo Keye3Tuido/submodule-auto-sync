@@ -1,0 +1,86 @@
+# 平台与权限
+
+本文规定平台接入时需要核实的条件。官方入口于 2026-11-10 查阅；实际接入时重新核对当前产品版本、接口文档、账号权限和组织策略。
+
+## GitHub
+
+推荐链路为子仓库 push 事件触发通知，向主仓库发送 `repository_dispatch`，主仓库完成对账并创建或更新 PR。主仓库保留手动入口，可增加定时对账。
+
+### 分支与触发
+
+- 主仓库默认分支中必须存在接收 `repository_dispatch` 的工作流；定时事件也依赖默认分支上的工作流。实际需要更新的主仓库目标分支应单独明确。
+- 通知可以覆盖全部子仓库分支，由主仓库 `.gitmodules` 判定版本；收窄 push 分支过滤时，核对其覆盖所有依赖方声明的分支。
+- `repository_dispatch` 的通知类型应固定并由主仓库明确接收。主仓库不得直接信任通知给出的 SHA 或仓库地址。
+- 定时任务明确使用的 UTC 时间、对应本地时区与周期。GitHub 的计划执行可能延迟或受仓库规则停用，需保留手动恢复入口。
+- 主仓库跟踪配置生效后重新对账，并检查子仓库通知配置是否需要调整。
+
+### 身份与权限
+
+| 用途 | GitHub 接入条件 |
+| --- | --- |
+| 跨仓库通知 | 向目标主仓库发送 repository_dispatch；fine-grained token 或 GitHub App installation token 需目标主仓库 Contents: write |
+| 读取私有子模块 | 对每个子仓库授予 Contents: read 或相应 Git 读取权限；主仓库的默认令牌通常不能跨仓库读取 |
+| 推送机器人分支 | 主仓库 Contents: write，且机器人分支保护规则允许该身份执行所需更新 |
+| 创建或更新 PR | 主仓库 Pull requests: write；查询权限也应可用 |
+| 使用 GITHUB_TOKEN 创建 PR | 除工作流权限外，核对仓库或组织是否允许 Actions 创建 PR |
+| 配置工作流与 Secret | 接入者拥有相应配置权限；修改工作流文件可能要求额外授权，不应自动扩大日常令牌范围 |
+| 人工合并 | 合并者满足目标分支保护、评审和状态检查规则 |
+
+子仓库自带的 `GITHUB_TOKEN` 受源仓库授权范围约束，不能将其当作已获得主仓库的跨仓库触发权限。使用 GitHub App 时，区分应用私钥与实际用于接口请求的短期 installation token，并核对应用安装到了哪些仓库。
+
+日常运行可根据组织策略使用 GITHUB_TOKEN、专用 fine-grained PAT 或 GitHub App。选择身份时，同时验证该身份推送和开 PR 后，项目要求的后续工作流是否会触发、是否需要批准。不能看到 PR 创建成功就认定构建检查已运行。
+
+### PR 对应关系
+
+查询开放 PR 时匹配完整 head（所属 owner 与机器人分支）和 base（主仓库目标分支），处理分页。推送到同一 head 更新已有 PR 的提交内容，PR 标题和正文另行更新。创建请求失败或超时后先重新查询，防止产生重复项。
+
+## Gitee
+
+先明确使用社区版 Gitee Go、企业流水线还是私有化实例。它们的配置和可用接口应分别核实。
+
+### 分支与触发
+
+按实际环境选择可用链路：
+
+- 能由子仓库 push 触发的流水线或执行器，取得主仓库目标分支后执行对账；不能沿用子仓库工作目录作为主仓库基线。
+- 子仓库 Webhook 通知经过校验的接收端，再启动已确认可用的主仓库侧执行流程。
+- 缺少事件执行条件时，使用已有调度器定时对账，并明确周期与延迟。
+
+Gitee 企业流水线支持代码源 push 触发并提供分支过滤；社区 Gitee Go 也有自身的触发配置。按实际产品确认是否能从所选子仓库事件启动所需流程、能否访问主仓库，以及是否提供适用的手动和定时入口。
+
+Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接入时确认事件类型、目标地址、密码或签名校验方式、请求结果、重试行为和执行记录。流水线执行 API 尚未核实时保留这一缺口，选择已确认的执行器或定时方案，不根据 PR API 推断存在流水线触发能力。
+
+### 身份与权限
+
+| 用途 | Gitee 接入条件 |
+| --- | --- |
+| 管理子仓库事件通知 | 接入者具有对应 Webhook 或流水线配置权限 |
+| 接收通知并启动流程 | 按实际 Gitee 产品或外部执行器核实触发凭证及允许事件来源 |
+| 读取主仓库及子仓库 | 对各仓库具有 Git 读取权限；逐个核对私有仓库访问 |
+| 推送机器人分支 | 对主仓库具有分支写入权限，且满足保护规则 |
+| 查询、创建和更新 PR | 主仓库对应的 PR API 权限及机器人身份访问权 |
+| 配置令牌和变量 | 接入者具有实际流水线或执行器的 Secret 管理权限 |
+| 人工合并 | 合并者满足主仓库目标分支的保护与评审要求 |
+
+令牌 scope 的名称、授权方式和 API 域名按公共平台或实际私有化实例核实，不沿用 GitHub 的权限名称。分别检查 Git 读写认证与 PR API 认证；其中一项成功不能证明另一项已授权。
+
+### PR 对应关系
+
+使用实例实际提供的 PR 查询、创建、编辑接口，按开放状态和准确源/目标分支复用 PR，处理分页。核对 API 返回的 PR 与远端机器人分支内容一致。公共 Gitee API 文档若需动态加载，应获取实际参数定义后再接入，不把文档入口存在当作接口参数已验证。
+
+## 跨平台仓库
+
+子模块可以与主仓库位于不同平台。分别确认源平台通知、执行器启动、子模块读取、主仓库写入和主平台 PR 创建权限；整个流程最终使用主仓库所在平台的 PR 规则。网络连通性和凭证不能因其中一段成功而省略核对。
+
+## 官方核验入口
+
+- Git `.gitmodules`：https://git-scm.com/docs/gitmodules
+- Git 子模块更新：https://git-scm.com/docs/git-submodule
+- GitHub 触发事件：https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+- GitHub 跨工作流触发与令牌规则：https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow
+- GitHub repository_dispatch：https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event
+- GitHub PR API：https://docs.github.com/en/rest/pulls/pulls
+- Gitee Go 触发配置：https://help.gitee.com/gitee-go/pipeline/trigger/
+- Gitee 企业流水线代码提交触发：https://help.gitee.com/enterprise/pipeline/source/trigger/
+- Gitee 帮助中心（Webhook 管理）：https://help.gitee.com
+- Gitee 公共 OpenAPI：https://gitee.com/api/v5/swagger
