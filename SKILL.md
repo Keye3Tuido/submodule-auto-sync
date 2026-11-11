@@ -54,6 +54,8 @@ description: 当用户需要制定、接入或审查 Git 子模块自动同步�
 
 Gitee 和 GitHub 的接入差异、权限及官方核验入口见 [平台与权限](references/platforms.md)。按实际平台读取对应部分；跨平台依赖分别核对各段能力。
 
+Gitee 子仓库需要在推送后触发、且希望使用免费托管执行时，评估 [Gitee Webhook → Cloudflare Workers → GitHub Actions](references/platforms.md#免费推送触发gitee--cloudflare-workers--github-actions)。公开 GitHub 仓库只托管通用工作流；先确认项目允许 Cloudflare 接收原始推送通知，以及 GitHub 托管运行器访问私有仓库。
+
 ## 3. 明确身份与权限
 
 为每条链路逐项确认“谁、对哪个仓库、执行什么操作、使用什么凭证”，不能用一个含糊的“配置 token”替代权限说明。

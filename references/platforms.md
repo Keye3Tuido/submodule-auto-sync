@@ -1,6 +1,6 @@
 # 平台与权限
 
-本文规定平台接入时需要核实的条件。官方入口于 2026-11-10 查阅；实际接入时重新核对当前产品版本、接口文档、账号权限和组织策略。
+本文规定平台接入时需要核实的条件。实际接入时重新核对当前产品版本、接口文档、账号权限和组织策略。
 
 ## GitHub
 
@@ -72,6 +72,22 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 
 子模块可以与主仓库位于不同平台。分别确认源平台通知、执行器启动、子模块读取、主仓库写入和主平台 PR 创建权限；整个流程最终使用主仓库所在平台的 PR 规则。网络连通性和凭证不能因其中一段成功而省略核对。
 
+### 免费推送触发：Gitee → Cloudflare Workers → GitHub Actions
+
+这条链路无需启用 Gitee Go。Gitee 仓库的 Push Webhook 通知 Cloudflare Worker，Worker 验证通知后调用 GitHub 的 `repository_dispatch`，公开执行仓库中的 GitHub Actions 对账并在主仓库所在平台创建或更新 PR。Gitee 原始事件与 GitHub 的认证和请求格式不同，由 Worker 完成转换。
+
+| 环节 | 接入条件与最小权限 |
+| --- | --- |
+| Gitee 子仓库 | 维护者有权配置 Push Webhook。为入口配置独立的验证凭证，按 Gitee 文档验证通知；只允许已配置的子仓库及分支组合。 |
+| Cloudflare Worker | 部署者有权管理目标 Cloudflare 账号的 Worker。把 Gitee 验证凭证与 GitHub 触发凭证放在 Worker Secrets。触发凭证仅授权指定执行仓库；`repository_dispatch` 要求该仓库的 GitHub App 安装令牌或细粒度令牌具备 `Contents: write`。 |
+| GitHub Actions | 在执行仓库的默认分支配置固定的 `repository_dispatch` 事件类型。将私有目标配置与跨平台凭证放在 Actions Secrets；执行身份只需读主仓库及所需子仓库、写主仓库机器人分支、创建或更新 PR。工作流本身的 `GITHUB_TOKEN` 按需授权，不用于 Gitee 认证。 |
+
+1. **先确定跟踪关系。** 从主仓库目标分支读取 `.gitmodules`，明确挂载路径、子仓库地址、跟踪分支及 PR 目标分支。Worker 的允许列表与这些配置保持一致；变更后核对订阅和允许列表。Runner 从可信配置读取实际目标，不能用事件决定访问哪座仓库或推送到哪个分支。
+2. **只转发触发信号。** Worker 校验 Gitee 通知，过滤非目标仓库或分支，向固定 GitHub 仓库发送固定事件类型。无需把 Gitee 原始请求、仓库名、分支、SHA、提交信息或人员数据转发到 GitHub。Actions 再从配置的跟踪分支读取实际版本，对账后只更新 gitlink，提交到机器人分支，由维护者合并 PR。
+3. **核对免费条件。** Cloudflare Workers Free 当前为每日 100,000 次请求、每次 10 毫秒 CPU 时间；部署前复核额度和超限行为，并控制重复投递。公开 GitHub 仓库使用标准 GitHub 托管运行器时，Actions 运行时间免费；大型运行器另行计费。无需为此上传产物。公开执行仓库采用团队明确授权的账号，凭证不得出现在 URL、仓库文件或可查看的运行输出中。
+4. **检查数据暴露。** Cloudflare 会接收原始 Gitee 事件，公开 GitHub 执行记录可能暴露触发时间。Worker 日志不记录请求头或正文；公开工作流不记录私有仓库 URL、分支、SHA、PR 链接或凭证，也不上传工作目录。GitHub 的密钥遮蔽不能替代日志检查。限制谁能修改执行仓库的默认分支和工作流；持有私有凭证的任务只运行可信代码，不执行外部 PR 或子模块提交带入的脚本。详细结果保留在主仓库的私有 PR 或受控渠道；若项目不允许这两个平台接触相应数据，改用受控接收端或执行器。
+5. **端到端验收。** 用已授权的测试推送确认指定分支触发并创建或更新一个 PR，未授权通知和其他分支不启动流程；重复通知不会重复开 PR，公开日志和产物不包含私有信息。保留手动对账入口，以便 Webhook 投递失败、服务限流或凭证过期后补做。
+
 ## 官方核验入口
 
 - Git `.gitmodules`：https://git-scm.com/docs/gitmodules
@@ -79,8 +95,13 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 - GitHub 触发事件：https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
 - GitHub 跨工作流触发与令牌规则：https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow
 - GitHub repository_dispatch：https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event
+- GitHub Actions 计费：https://docs.github.com/en/billing/concepts/product-billing/github-actions
+- GitHub Actions 安全用法：https://docs.github.com/en/actions/reference/security/secure-use
 - GitHub PR API：https://docs.github.com/en/rest/pulls/pulls
 - Gitee Go 触发配置：https://help.gitee.com/gitee-go/pipeline/trigger/
 - Gitee 企业流水线代码提交触发：https://help.gitee.com/enterprise/pipeline/source/trigger/
 - Gitee 帮助中心（Webhook 管理）：https://help.gitee.com
+- Gitee Webhook 验证：https://help.gitee.com/webhook/how-to-verify-webhook-keys
 - Gitee 公共 OpenAPI：https://gitee.com/api/v5/swagger
+- Cloudflare Workers 额度：https://developers.cloudflare.com/workers/platform/limits/
+- Cloudflare Workers Secrets：https://developers.cloudflare.com/workers/configuration/secrets/
