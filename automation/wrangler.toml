@@ -1,7 +1,0 @@
-name = "submodule-auto-sync-relay"
-main = "worker.js"
-compatibility_date = "2026-11-11"
-workers_dev = true
-
-[observability]
-enabled = false

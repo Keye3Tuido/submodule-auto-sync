@@ -1,5 +1,0 @@
-__pycache__/
-*.pyc
-.wrangler/
-.dev.vars*
-.env*
