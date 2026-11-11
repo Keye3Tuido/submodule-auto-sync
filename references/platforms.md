@@ -72,9 +72,13 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 
 子模块可以与主仓库位于不同平台。分别确认源平台通知、执行器启动、子模块读取、主仓库写入和主平台 PR 创建权限；整个流程最终使用主仓库所在平台的 PR 规则。网络连通性和凭证不能因其中一段成功而省略核对。
 
-### 免费推送触发：Gitee → Cloudflare Workers → GitHub Actions
+### 免费推送触发：Gitee → Hookdeck → Cloudflare Workers → GitHub Actions
 
-这条链路无需启用 Gitee Go。Gitee 仓库的 Push Webhook 通知 Cloudflare Worker，Worker 验证通知后调用 GitHub 的 `repository_dispatch`，公开执行仓库中的 GitHub Actions 对账并在主仓库所在平台创建或更新 PR。Gitee 原始事件与 GitHub 的认证和请求格式不同，由 Worker 完成转换。
+这条链路无需启用 Gitee Go。Gitee 仓库的 Push Webhook 先发送到 Hookdeck 的公网接收地址，再转发到 Cloudflare Worker；Worker 验证通知后调用 GitHub 的 `repository_dispatch`，公开执行仓库中的 GitHub Actions 对账并在主仓库所在平台创建或更新 PR。Gitee 原始事件与 GitHub 的认证和请求格式不同，由 Worker 完成转换。
+
+如果 Gitee 到 `workers.dev` 的投递出现连接超时，不能把 Worker 健康检查成功误认为 Gitee 链路可用。应将故障边界拆成三段分别验证：Gitee → Hookdeck、Hookdeck → Worker、Worker → GitHub。Hookdeck 的免费额度、事件留存、重试和数据处理范围必须在启用前核对；若该服务不可用，再评估其他公网入口。
+
+公网入口只承担接收和转发，不决定仓库、分支或目标 PR。Gitee Webhook 的密码用于验证来源；入口到 Worker 之间使用另一枚独立密钥。若入口会保存请求正文，应在接入清单中明确其留存期限和可见范围；不能把 GitHub 或 Gitee 访问令牌放进 Webhook URL、请求正文或日志。
 
 开始部署前，一次性主动列出以下清单，填写本次已核实值并标记缺口，供维护者直接配置：
 
@@ -88,6 +92,7 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 | Secret 映射 | 分别列出 Gitee 访问令牌、Webhook 验证密钥、GitHub dispatch 凭证、私有仓库配置及其他运行密钥的名称、用途、存放平台、输入方式和轮换位置；不同用途使用独立凭证。 |
 | 触发与允许范围 | Webhook 地址、Push 事件及分支过滤、密码或签名模式、Worker 来源允许列表、固定 GitHub 目标和事件类型、Actions 手动入口、并发及失败恢复方式。 |
 | 免费条件及信息流 | 当前核实的 Cloudflare 免费额度及超限行为、GitHub 公开仓库与标准运行器条件、各平台可接触的数据、公开日志规则及可能收费的功能。 |
+| Hookdeck | 项目、接收 URL、转发目标、入口到 Worker 的独立验证密钥、免费额度、重试和日志留存策略、停用方式。 |
 | 验收与维护 | 首次真实推送、重复/非目标/未授权通知、无更新、权限过期、PR 复用、人工合并、停用和恢复的检查动作及完成标准。 |
 
 接入权限与运行权限分别说明。配置 Webhook 的权限通常只在接入或变更时需要；进入日常运行前，确定是否仍需保留。凭证需要维护者操作时，提前告知配置入口、具体授权范围和安全输入位置，直到实际输入环节再交接，不要求在聊天中发送凭证值。
@@ -95,14 +100,16 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 | 环节 | 接入条件与最小权限 |
 | --- | --- |
 | Gitee 子仓库 | 维护者有权配置 Push Webhook。为入口配置独立的验证凭证，按 Gitee 文档验证通知；只允许已配置的子仓库及分支组合。 |
-| Cloudflare Worker | 部署者有权管理目标 Cloudflare 账号的 Worker。把 Gitee 验证凭证与 GitHub 触发凭证放在 Worker Secrets。触发凭证仅授权指定执行仓库；`repository_dispatch` 要求该仓库的 GitHub App 安装令牌或细粒度令牌具备 `Contents: write`。 |
+| Hookdeck | 维护者有权创建接收端和转发连接。Hookdeck 只保存独立转发密钥，不保存 Gitee 或 GitHub 访问令牌；需要核对免费额度、重试和日志留存策略。 |
+| Cloudflare Worker | 部署者有权管理目标 Cloudflare 账号的 Worker。把入口验证凭证与 GitHub 触发凭证放在 Worker Secrets。触发凭证仅授权指定执行仓库；`repository_dispatch` 要求该仓库的 GitHub App 安装令牌或细粒度令牌具备 `Contents: write`。 |
 | GitHub Actions | 在执行仓库的默认分支配置固定的 `repository_dispatch` 事件类型。将私有目标配置与跨平台凭证放在 Actions Secrets；执行身份只需读主仓库及所需子仓库、写主仓库机器人分支、创建或更新 PR。工作流本身的 `GITHUB_TOKEN` 按需授权，不用于 Gitee 认证。 |
 
 1. **先确定跟踪关系。** 从主仓库目标分支读取 `.gitmodules`，明确挂载路径、子仓库地址、跟踪分支及 PR 目标分支。Worker 的允许列表与这些配置保持一致；变更后核对订阅和允许列表。Runner 从可信配置读取实际目标，不能用事件决定访问哪座仓库或推送到哪个分支。
-2. **只转发触发信号。** Worker 校验 Gitee 通知，过滤非目标仓库或分支，向固定 GitHub 仓库发送固定事件类型。无需把 Gitee 原始请求、仓库名、分支、SHA、提交信息或人员数据转发到 GitHub。Actions 再从配置的跟踪分支读取实际版本，对账后只更新 gitlink，提交到机器人分支，由维护者合并 PR。
-3. **核对免费条件。** Cloudflare Workers Free 当前为每日 100,000 次请求、每次 10 毫秒 CPU 时间；部署前复核额度和超限行为，并控制重复投递。公开 GitHub 仓库使用标准 GitHub 托管运行器时，Actions 运行时间免费；大型运行器另行计费。无需为此上传产物。公开执行仓库采用团队明确授权的账号，凭证不得出现在 URL、仓库文件或可查看的运行输出中。
-4. **检查数据暴露。** Cloudflare 会接收原始 Gitee 事件，公开 GitHub 执行记录可能暴露触发时间。Worker 日志不记录请求头或正文；公开工作流不记录私有仓库 URL、分支、SHA、PR 链接或凭证，也不上传工作目录。GitHub 的密钥遮蔽不能替代日志检查。限制谁能修改执行仓库的默认分支和工作流；持有私有凭证的任务只运行可信代码，不执行外部 PR 或子模块提交带入的脚本。详细结果保留在主仓库的私有 PR 或受控渠道；若项目不允许这两个平台接触相应数据，改用受控接收端或执行器。
-5. **端到端验收。** 用已授权的测试推送确认指定分支触发并创建或更新一个 PR，未授权通知和其他分支不启动流程；重复通知不会重复开 PR，公开日志和产物不包含私有信息。保留手动对账入口，以便 Webhook 投递失败、服务限流或凭证过期后补做。
+2. **先验证网络分段。** 分别记录 Gitee Webhook 投递结果、入口到 Worker 的转发结果和 Worker 到 GitHub 的 dispatch 结果。出现连接超时、TLS 错误或 4xx/5xx 时，只重试对应分段；不能用下游成功推断上游已成功。
+3. **只转发触发信号。** Worker 校验 Gitee 通知，过滤非目标仓库或分支，向固定 GitHub 仓库发送固定事件类型。无需把 Gitee 原始请求、仓库名、分支、SHA、提交信息或人员数据转发到 GitHub。Actions 再从配置的跟踪分支读取实际版本，对账后只更新 gitlink，提交到机器人分支，由维护者合并 PR。
+4. **核对免费条件。** Cloudflare Workers Free 当前为每日 100,000 次请求、每次 10 毫秒 CPU 时间；部署前复核额度和超限行为，并控制重复投递。公开 GitHub 仓库使用标准 GitHub 托管运行器时，Actions 运行时间免费；大型运行器另行计费。公网入口的免费额度、重试、日志留存和超限行为必须单独核对。无需为此上传产物。公开执行仓库采用团队明确授权的账号，凭证不得出现在 URL、仓库文件或可查看的运行输出中。
+5. **检查数据暴露。** Hookdeck 和 Cloudflare 都可能接收原始 Gitee 事件，公开 GitHub 执行记录可能暴露触发时间。入口和 Worker 日志不记录请求头或正文；公开工作流不记录私有仓库 URL、分支、SHA、PR 链接或凭证，也不上传工作目录。GitHub 的密钥遮蔽不能替代日志检查。限制谁能修改执行仓库的默认分支和工作流；持有私有凭证的任务只运行可信代码，不执行外部 PR 或子模块提交带入的脚本。详细结果保留在主仓库的私有 PR 或受控渠道；若项目不允许 Hookdeck 或 Cloudflare 接触相应数据，改用受控接收端或执行器。
+6. **端到端验收。** 用已授权的测试推送确认指定分支触发并创建或更新一个 PR，未授权通知和其他分支不启动流程；重复通知不会重复开 PR，公开日志和产物不包含私有信息。保留手动对账和定时对账入口，以便 Webhook 投递失败、服务限流或凭证过期后补做。
 
 ## 官方核验入口
 
@@ -119,5 +126,6 @@ Webhook 的配置存在不代表主仓库侧已有可运行的接收入口。接
 - Gitee 帮助中心（Webhook 管理）：https://help.gitee.com
 - Gitee Webhook 验证：https://help.gitee.com/webhook/how-to-verify-webhook-keys
 - Gitee 公共 OpenAPI：https://gitee.com/api/v5/swagger
+- Hookdeck 文档：https://hookdeck.com/docs
 - Cloudflare Workers 额度：https://developers.cloudflare.com/workers/platform/limits/
 - Cloudflare Workers Secrets：https://developers.cloudflare.com/workers/configuration/secrets/
